@@ -33,3 +33,5 @@ data/counterrisk_historical_fraud_network.csv
 # OS
 .DS_Store
 Thumbs.db
+
+data/counterrisk_network_snapshots.json
