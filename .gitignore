@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+
+# Secrets
+.env
+.env.*
+
+# Large datasets
+data/ellipticpp/
+data/*.csv
+
+# Generated model files
+ml/*.pkl
+ml/*.joblib
+
+# Generated analysis files
+data/counterrisk_decisions.csv
+data/counterrisk_false_negatives.csv
+data/counterrisk_network_evidence.csv
+data/counterrisk_temporal_network_features.csv
+data/counterrisk_historical_fraud_network.csv
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
