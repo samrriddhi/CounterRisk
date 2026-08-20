@@ -1,586 +1,248 @@
-import pandas as pd
-import joblib
-
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import (
-    confusion_matrix,
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score
-)
-
-
 # ============================================================
-# 1. LOAD DATA + DEFENDER
-# ============================================================
-
-df = pd.read_csv("../data/transactions.csv")
-
-defender = joblib.load(
-    "counterrisk_defender.pkl"
-)
-
-
-# ============================================================
-# 2. FEATURES
-# ============================================================
-
-features = [
-    "amount",
-    "user_avg_amount",
-    "amount_ratio",
-    "account_age_days",
-    "is_new_device",
-    "location_changed",
-    "transaction_velocity",
-    "receiver_risk",
-    "receiver_fraud_rate",
-    "known_receiver",
-    "previous_fraud_count",
-    "shared_device_accounts",
-    "shared_ip_accounts",
-    "impossible_travel",
-    "payment_method",
-    "location"
-]
-
-
-X = df[features]
-y = df["is_fraud"]
-
-
-# ============================================================
-# 3. SAME TEST SPLIT AS DEFENDER
-# ============================================================
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.20,
-    random_state=42,
-    stratify=y
-)
-
-
-# ============================================================
-# 4. DEFENDER OUTPUT
-# ============================================================
-
-defender_probability = defender.predict_proba(
-    X_test
-)[:, 1]
-
-defender_prediction = (
-    defender_probability >= 0.50
-).astype(int)
-
-
-results = df.loc[X_test.index].copy()
-
-results["defender_probability"] = (
-    defender_probability
-)
-
-results["defender_prediction"] = (
-    defender_prediction
-)
-
-
-# ============================================================
-# 5. COUNTER-EVIDENCE
+# COUNTERRISK CHALLENGER
 #
-# The Challenger is deliberately conservative.
+# The Challenger independently reviews the Defender's
+# assessment using historical information available before
+# the current transaction.
 #
-# It does NOT ask:
-# "Can I find one legitimate signal?"
+# It can challenge the Defender in either direction:
 #
-# It asks:
-# "Is there a strong collection of legitimate signals
-#  AND is the fraud evidence relatively weak?"
-# ============================================================
-
-def calculate_counter_evidence(row):
-
-    score = 0
-    evidence = []
-
-
-    # --------------------------------------------------------
-    # STRONG LEGITIMATE EVIDENCE
-    # --------------------------------------------------------
-
-    if row["known_receiver"] == 1:
-        score += 2
-        evidence.append("Known receiver")
-
-
-    if row["account_age_days"] >= 365:
-        score += 2
-        evidence.append("Established account")
-
-
-    if row["receiver_fraud_rate"] <= 0.25:
-        score += 2
-        evidence.append("Low receiver fraud history")
-
-
-    if row["shared_device_accounts"] <= 5:
-        score += 1
-        evidence.append("Limited device sharing")
-
-
-    if row["shared_ip_accounts"] <= 6:
-        score += 1
-        evidence.append("Limited IP sharing")
-
-
-    if row["impossible_travel"] == 0:
-        score += 2
-        evidence.append("No impossible travel")
-
-
-    # --------------------------------------------------------
-    # FRAUD HISTORY
-    #
-    # Previous fraud is a very strong reason NOT to challenge.
-    # --------------------------------------------------------
-
-    if row["previous_fraud_count"] == 0:
-        score += 2
-        evidence.append("No previous fraud history")
-
-    elif row["previous_fraud_count"] >= 2:
-        score -= 4
-        evidence.append("Multiple previous fraud events")
-
-    else:
-        score -= 2
-        evidence.append("Previous fraud history")
-
-
-    # --------------------------------------------------------
-    # NETWORK RISK
-    # --------------------------------------------------------
-
-    if row["shared_device_accounts"] >= 8:
-        score -= 3
-        evidence.append("Heavy device sharing")
-
-
-    if row["shared_ip_accounts"] >= 10:
-        score -= 3
-        evidence.append("Heavy IP sharing")
-
-
-    # --------------------------------------------------------
-    # RECEIVER RISK
-    # --------------------------------------------------------
-
-    if row["receiver_risk"] >= 0.75:
-        score -= 3
-        evidence.append("High receiver risk")
-
-
-    if row["receiver_fraud_rate"] >= 0.40:
-        score -= 3
-        evidence.append("High receiver fraud rate")
-
-
-    # --------------------------------------------------------
-    # IMPOSSIBLE TRAVEL
-    #
-    # This should almost completely block a challenge.
-    # --------------------------------------------------------
-
-    if row["impossible_travel"] == 1:
-        score -= 5
-        evidence.append("Impossible travel")
-
-
-    return score, evidence
-
-
-# ============================================================
-# 6. CALCULATE CHALLENGER SCORES
-# ============================================================
-
-counter_scores = []
-counter_evidence = []
-
-
-for _, row in X_test.iterrows():
-
-    score, evidence = calculate_counter_evidence(
-        row
-    )
-
-    counter_scores.append(score)
-    counter_evidence.append(evidence)
-
-
-results["counter_score"] = counter_scores
-
-results["counter_evidence"] = counter_evidence
-
-
-# ============================================================
-# 7. FINAL DECISION
-# ============================================================
-
-results["final_prediction"] = (
-    results["defender_prediction"]
-)
-
-
-# ============================================================
-# 8. VERY IMPORTANT:
+# 1. Defender may be OVERREACTING
+#    High risk + clean historical network
 #
-# Challenger only reviews borderline Defender decisions.
-#
-# Extremely high-risk transactions are NOT overturned.
+# 2. Defender may be UNDERESTIMATING
+#    Low/moderate risk + strong historical fraud network
 # ============================================================
 
-for index, row in results.iterrows():
 
-    defender_risk = row["defender_probability"]
+class CounterRiskChallenger:
 
-    counter_score = row["counter_score"]
+    def __init__(self):
 
-
-    # Challenger only gets authority over this
-    # borderline/high-risk region.
-    #
-    # It does NOT touch probabilities >= 0.90.
-
-    borderline = (
-        0.50 <= defender_risk < 0.90
-    )
+        self.name = (
+            "CounterRisk Evidence Challenger"
+        )
 
 
-    strong_counter_evidence = (
-        counter_score >= 9
-    )
+    # ========================================================
+    # INVESTIGATE
+    # ========================================================
 
-
-    # Additional safety conditions.
-
-    safe_receiver = (
-        row["receiver_risk"] < 0.75
-    )
-
-
-    no_impossible_travel = (
-        row["impossible_travel"] == 0
-    )
-
-
-    low_network_risk = (
-        row["shared_device_accounts"] < 8
-        and
-        row["shared_ip_accounts"] < 10
-    )
-
-
-    limited_fraud_history = (
-        row["previous_fraud_count"] == 0
-    )
-
-
-    # --------------------------------------------------------
-    # CHALLENGE ONLY IF EVERYTHING AGREES
-    # --------------------------------------------------------
-
-    if (
-        row["defender_prediction"] == 1
-        and borderline
-        and strong_counter_evidence
-        and safe_receiver
-        and no_impossible_travel
-        and low_network_risk
-        and limited_fraud_history
+    def investigate(
+        self,
+        defender_probability,
+        prior_connected_transactions,
+        prior_illicit_connections,
+        prior_illicit_ratio,
+        connected_wallets
     ):
 
-        results.at[
-            index,
-            "final_prediction"
-        ] = 0
+        supporting_evidence = []
 
+        counter_evidence = []
 
-# ============================================================
-# 9. BASELINE METRICS
-# ============================================================
+        challenger_reasons = []
 
-baseline_cm = confusion_matrix(
-    y_test,
-    results["defender_prediction"]
-)
 
-baseline_tn, baseline_fp, \
-baseline_fn, baseline_tp = baseline_cm.ravel()
+        # ====================================================
+        # 1. HISTORICAL FRAUD EVIDENCE
+        # ====================================================
 
+        if prior_illicit_connections > 0:
 
-baseline_fpr = (
-    baseline_fp /
-    (baseline_fp + baseline_tn)
-)
+            supporting_evidence.append(
+                f"{prior_illicit_connections} "
+                f"prior connected transaction(s) "
+                f"were historically illicit."
+            )
 
 
-baseline_recall = (
-    baseline_tp /
-    (baseline_tp + baseline_fn)
-)
+        if prior_illicit_ratio >= 0.50:
 
+            supporting_evidence.append(
+                f"Historical illicit ratio is "
+                f"{prior_illicit_ratio:.1%}, "
+                f"indicating strong prior fraud exposure."
+            )
 
-# ============================================================
-# 10. FINAL METRICS
-# ============================================================
+        elif prior_illicit_ratio >= 0.20:
 
-final_cm = confusion_matrix(
-    y_test,
-    results["final_prediction"]
-)
+            supporting_evidence.append(
+                f"Historical illicit ratio is "
+                f"{prior_illicit_ratio:.1%}, "
+                f"indicating meaningful prior fraud exposure."
+            )
 
-final_tn, final_fp, \
-final_fn, final_tp = final_cm.ravel()
 
+        # ====================================================
+        # 2. LEGITIMACY / COUNTER-EVIDENCE
+        # ====================================================
 
-final_accuracy = accuracy_score(
-    y_test,
-    results["final_prediction"]
-)
+        if (
+            prior_connected_transactions >= 2
+            and
+            prior_illicit_connections == 0
+        ):
 
+            counter_evidence.append(
+                "Historical network activity exists "
+                "without confirmed prior illicit activity."
+            )
 
-final_precision = precision_score(
-    y_test,
-    results["final_prediction"],
-    zero_division=0
-)
 
+        if (
+            prior_connected_transactions > 0
+            and
+            prior_illicit_ratio == 0
+        ):
 
-final_recall = recall_score(
-    y_test,
-    results["final_prediction"],
-    zero_division=0
-)
+            counter_evidence.append(
+                "No confirmed illicit activity exists "
+                "within the prior connected history."
+            )
 
 
-final_f1 = f1_score(
-    y_test,
-    results["final_prediction"],
-    zero_division=0
-)
+        # ====================================================
+        # 3. CHALLENGE: DEFENDER MAY BE OVERREACTING
+        # ====================================================
 
+        if (
+            defender_probability >= 0.75
+            and
+            prior_connected_transactions >= 5
+            and
+            prior_illicit_ratio == 0
+        ):
 
-final_fpr = (
-    final_fp /
-    (final_fp + final_tn)
-)
+            challenger_reasons.append(
+                "Defender risk is high, but the "
+                "historical network contains no "
+                "confirmed illicit activity."
+            )
 
 
-# ============================================================
-# 11. CHALLENGED TRANSACTIONS
-# ============================================================
+        # ====================================================
+        # 4. CHALLENGE: DEFENDER MAY BE UNDERESTIMATING
+        # ====================================================
 
-challenged = results[
-    (
-        results["defender_prediction"] == 1
-    )
-    &
-    (
-        results["final_prediction"] == 0
-    )
-]
+        if (
+            defender_probability < 0.50
+            and
+            prior_illicit_ratio >= 0.50
+        ):
 
+            challenger_reasons.append(
+                "Defender risk is below 50%, but "
+                "historical network evidence shows "
+                "a strong illicit concentration."
+            )
 
-correctly_overturned = challenged[
-    challenged["is_fraud"] == 0
-]
 
+        # ====================================================
+        # 5. MODERATE CONFLICT
+        # ====================================================
 
-incorrectly_overturned = challenged[
-    challenged["is_fraud"] == 1
-]
+        if (
+            defender_probability < 0.65
+            and
+            prior_illicit_ratio >= 0.20
+        ):
 
+            challenger_reasons.append(
+                "Network evidence materially conflicts "
+                "with the Defender's moderate risk estimate."
+            )
 
-# ============================================================
-# 12. FALSE-POSITIVE IMPROVEMENT
-# ============================================================
 
-if baseline_fpr > 0:
+        # ====================================================
+        # 6. DETERMINE OUTCOME
+        # ====================================================
 
-    fpr_improvement = (
-        (
-            baseline_fpr - final_fpr
-        )
-        /
-        baseline_fpr
-    ) * 100
+        if challenger_reasons:
 
-else:
+            outcome = "DISPUTE"
 
-    fpr_improvement = 0
+        else:
 
+            outcome = "SUPPORT"
 
-# ============================================================
-# 13. PRINT RESULTS
-# ============================================================
 
-print()
-print("========================================")
-print("       COUNTERRISK CHALLENGER")
-print("========================================")
+        # ====================================================
+        # 7. DETERMINE DIRECTION
+        # ====================================================
 
+        direction = "NONE"
 
-print()
-print("DEFENDER BASELINE")
-print("----------------------------------------")
 
-print(
-    f"False positives : {baseline_fp}"
-)
+        # Challenger thinks Defender is too aggressive.
 
-print(
-    f"False positive rate : "
-    f"{baseline_fpr:.4f}"
-)
+        if (
+            defender_probability >= 0.75
+            and
+            prior_illicit_ratio == 0
+            and
+            prior_connected_transactions >= 5
+        ):
 
-print(
-    f"Fraud recall : "
-    f"{baseline_recall:.4f}"
-)
+            direction = "DEFENDER_TOO_AGGRESSIVE"
 
 
-print()
-print("CHALLENGER ACTIVITY")
-print("----------------------------------------")
+        # Challenger thinks Defender is too optimistic.
 
-print(
-    f"Decisions challenged : "
-    f"{len(challenged)}"
-)
+        elif (
+            defender_probability < 0.50
+            and
+            prior_illicit_ratio >= 0.50
+        ):
 
-print(
-    f"Correctly overturned : "
-    f"{len(correctly_overturned)}"
-)
+            direction = "DEFENDER_UNDERESTIMATES_RISK"
 
-print(
-    f"Incorrectly overturned : "
-    f"{len(incorrectly_overturned)}"
-)
 
+        # ====================================================
+        # 8. CONFIDENCE
+        # ====================================================
 
-print()
-print("FINAL COUNTERRISK RESULTS")
-print("----------------------------------------")
-
-print(
-    f"Accuracy : "
-    f"{final_accuracy:.4f}"
-)
+        if prior_illicit_ratio >= 0.50:
 
-print(
-    f"Precision : "
-    f"{final_precision:.4f}"
-)
+            challenger_confidence = "HIGH"
 
-print(
-    f"Recall : "
-    f"{final_recall:.4f}"
-)
+        elif (
+            prior_illicit_ratio >= 0.20
+            or
+            prior_connected_transactions >= 5
+        ):
 
-print(
-    f"F1 Score : "
-    f"{final_f1:.4f}"
-)
+            challenger_confidence = "MEDIUM"
 
-print(
-    f"False positives : "
-    f"{final_fp}"
-)
+        else:
 
-print(
-    f"False positive rate : "
-    f"{final_fpr:.4f}"
-)
+            challenger_confidence = "LOW"
 
-print(
-    f"False-positive improvement : "
-    f"{fpr_improvement:.2f}%"
-)
 
+        # ====================================================
+        # 9. RESULT
+        # ====================================================
 
-# ============================================================
-# 14. CONFUSION MATRICES
-# ============================================================
+        return {
 
-print()
-print("BASELINE CONFUSION MATRIX")
-print("----------------------------------------")
+            "outcome":
+                outcome,
 
-print(
-    baseline_cm
-)
+            "direction":
+                direction,
 
+            "confidence":
+                challenger_confidence,
 
-print()
-print("FINAL CONFUSION MATRIX")
-print("----------------------------------------")
+            "supporting_evidence":
+                supporting_evidence,
 
-print(
-    final_cm
-)
+            "counter_evidence":
+                counter_evidence,
 
+            "challenger_reasons":
+                challenger_reasons,
 
-# ============================================================
-# 15. SHOW CHALLENGED TRANSACTIONS
-# ============================================================
-
-print()
-print("TOP CHALLENGED TRANSACTIONS")
-print("----------------------------------------")
-
-
-if len(challenged) > 0:
-
-    columns = [
-        "transaction_id",
-        "scenario",
-        "defender_probability",
-        "counter_score",
-        "known_receiver",
-        "account_age_days",
-        "previous_fraud_count",
-        "receiver_risk",
-        "receiver_fraud_rate",
-        "shared_device_accounts",
-        "shared_ip_accounts",
-        "impossible_travel",
-        "is_fraud"
-    ]
-
-
-    print(
-        challenged[
-            columns
-        ]
-        .sort_values(
-            "defender_probability",
-            ascending=False
-        )
-        .head(15)
-        .to_string(
-            index=False
-        )
-    )
-
-else:
-
-    print(
-        "No transactions were challenged."
-    )
-
-
-print()
-print("========================================")
+            "disputes_defender":
+                outcome == "DISPUTE"
+        }
